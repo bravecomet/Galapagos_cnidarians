@@ -6,4 +6,5 @@ Understanding how temperature governs biological systems is increasingly urgent 
 Keywords: adaptive traits, climate resilience, ‘colder-is-better’ hypothesis, Galápagos Archipelago, metabolic trade-offs, octocorals, thermal performance, upwelling systems
 
 All statistical analyses were conducted in R v. 4.2.2
-Associated packages: LoLinR, nls.multsart, lme4
+
+Associated packages: *LoLinR*, *nls.multsart*, *lme4*
