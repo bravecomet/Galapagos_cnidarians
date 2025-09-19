@@ -7,4 +7,4 @@ Keywords: adaptive traits, climate resilience, ‘colder-is-better’ hypothesis
 
 All statistical analyses were conducted in R v. 4.2.2
 
-Associated packages: *LoLinR*, *nls.multsart*, *lme4*
+**Folder/File Structure & Contents**
