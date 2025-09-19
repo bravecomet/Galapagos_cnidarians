@@ -17,6 +17,8 @@ Below contains a list of the associated datafiles and folders, woth descriptions
 - HOBO_temperature_data.csv: Environmental temperature records used to characterize the thermal history of locations where the cnidarians reside. Data collected includes 7/28/2019 - 1/7/2022 @ 15 min intervals
 - README.md: This main document, outlining the purpose, background, methods, and general information on packages and analyses
 
-
+**How to Run / Reproduce the Analyses**
+Below are step by step instructions to run analyses in this repository, including configuration and assumptions. Adjust paths or versions as needed.
+1. Prerequisites: Install R (version > 4.4.2). Ensure required R packages are available. From the README, these include (but may not be limited to): LoLinR, nls.multstart, lme4, plus any packages used for plotting (ggplot2, etc.)
 
 
