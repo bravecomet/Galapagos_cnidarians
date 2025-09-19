@@ -11,6 +11,9 @@ All statistical analyses were conducted in R v. 4.2.2
 Below contains a list of the associated datafiles and folders, woth descriptions of what lives in each:
 
 - Cni_respiration_files: Contains species' subfolders of raw, temperature-dependent O2 measurements across the experimental temperature gradient
+- Generated_rate_estimations: Contains processed, model-derived calculations of metabolic rates for each individual per species x temperature pairing
+- Scripts_Rfiles: The R scripts used to process the raw data, estimate rates, perform statistical analyses, and generate plots. Also included are produced raw data files
+- Cni_metadata.csv: The metadata for every individual in this study, which includes parameters like the start/stop time of each trial, chamber volume/channel, and ash free dry weight estimates
 
 
 
