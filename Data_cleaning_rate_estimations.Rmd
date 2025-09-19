@@ -85,7 +85,6 @@ Sample.Info$Start.time <- as.POSIXct(Sample.Info$Start.time,format="%H:%M:%S", t
 Sample.Info$Stop.Time <- as.POSIXct(Sample.Info$Stop.Time,format="%H:%M:%S", tz = "") #convert time from character to time
 #Add names for respiration for for loop 
 #PR<-c('Photo','Resp')
-
 ```
 
 #Calculating O2 consumption for every file in list
@@ -284,6 +283,7 @@ Photo.R_full.blnk$umol.cm2.hr<- -Photo.R_full.blnk$umol.cm2.hr
 
 View(Photo.R_full.blnk)
 ```
+
 
 
 ```{r}

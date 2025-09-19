@@ -1,0 +1,1007 @@
+---
+title: "TPC_derivation_and_analysis"
+output: html_document
+date: '2025-09-19'
+---
+
+#Install required packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, echo = TRUE)
+ # will automatically include code in the ouput unless we state otherwise
+knitr::opts_chunk$set(warning= FALSE) # will NOT include warning messages in the output unless we state otherwise
+# knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE) #keeps code wrapped in the output
+# if you haven't installed these packages run the following line (first delete the # sign):
+
+#install.packages(c("tidyverse", "janitor", "kableExtra", "cowplot", "skimr", "measurements"))
+library(tidyverse) #data wrangling & cleaning incl. ggplot
+library(janitor) # more data cleaning functions
+library(kableExtra) # making pretty tables
+library(cowplot) # making publication quality figures or multi-panel figures
+library(skimr) # tool to get quick overview of dataset
+library(measurements) # useful to convert units
+library(magrittr) # magrittr::
+library(boot)
+library(mime)
+library(checkmate)
+library(curl)
+library(nls.multstart)
+library(broom) #augment
+library(boot)
+library(nlstools)
+library(proto)
+library(nls2)
+library(here)
+library(lme4)
+library(Matrix)
+library(lmerTest)
+library(stats)
+library(Rmisc)
+library(purrr) #map
+library(Hmisc)
+library(FSA)
+library(rcompanion)
+library(car)
+library(multcompView)
+library(lsmeans)
+library(sjstats)
+library(pwr)
+library(jtools)
+library(ggpubr)
+library(multcomp)
+library(sjPlot)
+library(sjlabelled)
+library(sjmisc)
+library(ggeffects)
+library(wesanderson)
+library(patchwork)
+library(dplyr)
+```
+
+#Read in raw data
+```{r}
+# Raw Data {.tabset}
+#Data consists of metabolic rates for each individuals Dark Respiration
+
+setwd("~/Desktop/TPC_derivation_and_analysis")
+
+
+mydata<-read.csv('Output/Photo.R_full.csv')
+
+#mydata$X<-NULL
+View(mydata)
+
+```
+
+#######Deriving thermal performance parameters from the SS-model equation######
+
+# define the Sharpe-Schoolfield equation
+```{r}
+schoolfield_high <- function(lnc, E, Eh, Th, temp, Tc) {
+  Tc <- 273.15 + Tc
+  k <- 8.62e-5
+  boltzmann.term <- lnc + log(exp(E/k*(1/Tc - 1/temp))) #units are eV/K, electrovolts/Kelvin
+  inactivation.term <- log(1/(1 + exp(Eh/k*(1/Th - 1/temp))))
+  return(boltzmann.term + inactivation.term)
+}
+```
+
+# fit over each set of groupings, this takes 2-3 mins to run
+```{r}
+fits <- mydata %>%
+  group_by(., individual.ID, Species) %>%
+  nest() %>%
+  mutate(fit = purrr::map(data, ~ nls_multstart(log.rate ~ schoolfield_high(lnc, E, Eh, Th, temp = K, Tc = 23),
+                                                data = .x,
+                                                iter = 1000,
+                                                start_lower = c(lnc = -10, E = -5, Eh = -5, Th = 180),
+                                                start_upper = c(lnc = 10, E = 5, Eh = 70, Th = 390),
+                                                supp_errors = 'Y',
+                                                na.action = na.omit,
+                                                lower = c(lnc = -10, E = -10, Eh = -10, Th = -10))))
+```
+
+# look at a single fit
+```{r}
+summary(fits$fit[[1]])
+
+# look at output object
+#select(fits, ID, data, fit)  
+
+# get summary info
+info <- fits %>%
+  unnest_legacy(fit %>% map(glance))
+
+# get params
+params <- fits %>%
+  unnest_legacy(fit %>% map(tidy))
+```
+
+#left join params with meta data file to have treatment in data frame
+```{r}
+params <- left_join(params, mydata, by = "individual.ID")
+
+View(params)
+write.csv(params, "../Cni_phys_TPC/Output/params_table.csv")
+```
+
+# get confidence intervals
+```{r}
+CI <- fits %>%
+  unnest_legacy(fit %>% map(~ confint2(.x) %>%
+                       data.frame() #%>%
+                      # rename(., conf.low = X2.5.., conf.high = X97.5..)
+                     )) %>%
+  group_by(., individual.ID, Species) %>%
+  mutate(., term = c('lnc', 'E', 'Eh', 'Th')) %>%
+  ungroup()
+```
+
+
+```{r}
+colnames(CI)[4:5]<-c("conf.low", "conf.high") # rename columns
+
+# merge parameters and CI estimates
+params <- merge(params, CI, by = intersect(names(params), names(CI)))
+
+# get predictions
+preds <- fits %>%
+  unnest_legacy(fit %>% map(augment))
+
+# #select(info, fragment.ID, logLik, AIC, BIC, deviance, df.residual)
+
+# # new data frame of predictions, do this to set a sequence to make a smooth curve with your prediction points
+ new_preds <- mydata %>%  do(., data.frame(K = seq(min(.$K), max(.$K), length.out = 150), stringsAsFactors = FALSE)) #setting a specific sequence so you can have a smooth curve
+```
+
+# max and min for each curve
+```{r}
+max_min <- mydata %>% group_by(individual.ID) %>%
+  dplyr::summarise(., min_K = min(K), max_K = max(K)) %>%
+  ungroup()
+```
+
+# create new predictions
+```{r}
+# create new predictions
+preds2 <- fits %>%
+  unnest_legacy(fit %>% map(augment, newdata = new_preds)) %>%
+  merge(., max_min, by = "individual.ID") %>%
+  group_by(., individual.ID, Species) %>%
+  filter(., K > unique(min_K) & K < unique(max_K)) %>%
+  dplyr::rename(., ln.rate = .fitted) %>%
+  ungroup()
+
+write.csv(preds2, "../Cni_phys_TPC/Output/preds2.csv")
+```
+
+# Calculating Topt parameter
+```{r}
+get_topt <- function(E, Th, Eh){
+  return((Eh*Th)/(Eh + (8.62e-05 *Th*log((Eh/E) - 1))))
+}
+
+# Synthesizing data from all the temperature to one. I am summarizing (mean) all the rows for each species. The mean of 10-12 values that are the same as the value (ie duplicates) 
+params_short <- params %>%
+  dplyr::select(individual.ID, Species, term, estimate) %>%
+  dplyr::group_by(Species, term, individual.ID) %>%
+  dplyr::summarise(estimate = mean(estimate))
+
+View(params_short)
+
+#Nyssa code for topt using the summarize of each  
+Topt_data <- params_short %>%
+  dplyr::select(individual.ID, Species, term, estimate) %>%
+  spread(term, estimate) %>%
+  mutate(Topt = get_topt(E, Th, Eh)) %>%
+  group_by(., Species, individual.ID)
+
+View(Topt_data)
+
+#Converting topt to celsius 
+Topt_data$Topt <- Topt_data$Topt - 273.15 
+View(Topt_data)
+
+write.csv(Topt_data, "Coral_TP_params.csv")
+
+
+Topt_summarise<-Topt_data %>%
+  group_by(., Species ) %>%
+  summarise_all(mean, na.rm=TRUE)
+
+#Topt_summarise$Topt_C<-Topt_summarise$Topt-273.15
+
+View(Topt_summarise)
+
+write.csv(Topt_summarise, "sumTP_coral_parameters.csv")
+```
+
+#Derive Pmax parameter
+```{r}
+Pmax <- Topt_data %>%
+  #dplyr::select(Species, individual.ID, E, Eh, lnc, Th) %>%
+  #group_by(Species, individual.ID) %>%
+  #summarise(Pmax = schoolfield_high(lnc = lnc, E = E, Th = Th , Eh = Eh, temp = Topt_data$Topt, Tc = 23))
+  mutate(Pmax = schoolfield_high(lnc = lnc, E = E, Th = Th, Eh = Eh, temp = Topt + 273.15, Tc = 23))
+ 
+write.csv(Pmax, "Pmax.csv")
+```
+
+#Outlier removal method IQR*1.5: Topt, E, Eh, Pmax
+```{r}
+# Your dataset with a single variable (e.g., "data")
+#data <- c(enter value set here)
+
+# Set a threshold for Z-scores to identify outliers
+threshold <- 1.5  # You can adjust this threshold as needed
+
+# Initialize a variable to store outliers
+all_outliers <- c()
+
+while (TRUE) {
+  # Calculate the mean and standard deviation of the data
+  mean_data <- mean(data)
+  sd_data <- sd(data)
+
+  # Calculate Z-scores for each data point
+  z_scores <- (data - mean_data) / sd_data
+
+  # Identify outliers
+  outliers <- which(abs(z_scores) > threshold)
+  
+  # If no outliers are found, break the loop
+  if (length(outliers) == 0) {
+    break
+  }
+  
+  # Print and store the outliers
+  cat("Outliers:", data[outliers], "\n")
+  all_outliers <- c(all_outliers, data[outliers])
+  
+  # Remove the first outlier found
+  data <- data[-outliers[1]]
+}
+
+# Print all outliers
+cat("All outliers:", all_outliers, "\n")
+```
+
+#######Figures####### 
+
+##Thermal parameter mean (+/-95% CI) bar plots across species (Fig 1)
+
+#Topt mean plot
+```{r}
+library(ggplot2)
+library(dplyr)
+
+Topt_data <- read.csv('Coral_Topt.csv')
+
+# Convert 'Species' to factor and remove Tcocc species
+Topt_data$Species <- as.factor(Topt_data$Species)
+Topt_data <- Topt_data[Topt_data$Species != 'Tcocc', ]
+
+# Define custom colors
+custom_colors <- c("Bgran" = "lemonchiffon2", "Pdarw" = "salmon", "Mplan" = "mediumpurple1")
+
+# Define the desired order of species
+desired_order <- c("Pdarw", "Mplan", "Bgran")
+
+# Reorder the 'Species' factor
+Topt_data$Species <- factor(Topt_data$Species, levels = desired_order)
+
+# Full names for the species
+full_names <- c("P. darwinii", "M. plantaginea", "B. grandis")
+
+Topt_data_filtered_summary <- Topt_data %>%
+  group_by(Species) %>%
+  summarise(Topt_mean = mean(Topt), 
+            sd = sd(Topt),
+            n = n()) %>%
+  mutate(se = qt(0.975, df = n - 1) * (sd / sqrt(n))) %>%
+  ungroup()
+
+Topt <- ggplot() + 
+  geom_point(data = Topt_data_filtered_summary, 
+             aes(x = Species, y = Topt_mean, color = Species), 
+             shape = "-", size = 40, 
+             position = position_dodge(width = 0.85)) +
+  geom_errorbar(data = Topt_data_filtered_summary, 
+                aes(x = Species, ymin = Topt_mean - se, ymax = Topt_mean + se, 
+                    colour = Species),  
+                size = 27, width = 0, alpha = 0.5, 
+                position = position_dodge(width = 0.85)) +
+  geom_jitter(data = Topt_data, 
+              aes(x = Species, y = Topt, colour = Species),
+              size = 1.5, alpha = 0.75, 
+              position = position_jitterdodge(jitter.width = 0.2,
+                                               jitter.height = 0.02, 
+                                               dodge.width = 0.85)) +
+ theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 18, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        strip.text.x = element_blank(),
+        axis.line.x.top = element_blank(),
+        axis.line.y.right = element_blank(),
+        legend.position = "none",
+        legend.text = element_text(size = 17),
+        legend.title = element_text(size = 19),
+        axis.title.x = element_text(size = 23, margin = margin(t = 15)), # Adjust the margin here
+        axis.title.y = element_text(size = 23, colour = "black"),  # Adjust the margin here
+        plot.title = element_text(size = 27, face = "bold", hjust = -.1)) +
+  scale_x_discrete(labels = c("P. darwinii", "M. plantaginea", "B. grande")) +
+  scale_y_continuous(limits = c(32, 36.77), breaks = seq(32, 36, by = 1)) +
+  ggtitle(expression(bold("a  ")~italic(T[plain(opt)]))) +
+  labs(x = NULL, y = "Temperature (°C)") +
+  scale_color_manual(values = custom_colors)
+
+Topt
+```
+
+#Pmax mean plot
+```{r}
+library(ggplot2)
+library(dplyr)
+
+pmax_data <- read.csv('Coral_Pmax.csv')
+
+# Convert 'Species' to factor and remove Tcocc species
+pmax_data$Species <- as.factor(pmax_data$Species)
+pmax_data <- pmax_data[pmax_data$Species != 'Tcocc', ]
+
+# Define custom colors
+custom_colors <- c("Bgran" = "lemonchiffon2", "Pdarw" = "salmon", "Mplan" = "mediumpurple1")
+
+# Define the desired order of species
+desired_order <- c("Pdarw", "Mplan", "Bgran")
+
+# Reorder the 'Species' factor
+pmax_data$Species <- factor(pmax_data$Species, levels = desired_order)
+
+# Full names for the species
+full_names <- c("P. darwinii", "M. plantaginea", "B. grandis")
+
+pmax_data_filtered_summary <- pmax_data %>%
+  group_by(Species) %>%
+  summarise(Topt_mean = mean(Pmax), 
+            sd = sd(Pmax),
+            n = n()) %>%
+  mutate(se = qt(0.975, df = n - 1) * (sd / sqrt(n))) %>%
+  ungroup()
+
+Pmax <- ggplot() + 
+  geom_point(data = pmax_data_filtered_summary, 
+             aes(x = Species, y = Topt_mean, color = Species), 
+             shape = "-", size = 40,  # Adjust size for line thickness
+             position = position_dodge(width = 0.85)) +
+  geom_errorbar(data = pmax_data_filtered_summary, 
+                aes(x = Species, ymin = Topt_mean - se, ymax = Topt_mean + se, 
+                    colour = Species),  
+                size = 27, width = 0, alpha = 0.5, 
+                position = position_dodge(width = 0.85)) +
+  geom_jitter(data = pmax_data, 
+              aes(x = Species, y = Pmax, 
+                  colour = Species),
+              size = 1.5, alpha = 0.75, 
+              position = position_jitterdodge(jitter.width = 0.2,
+                                               jitter.height = 0.02, 
+                                               dodge.width = 0.85)) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 18, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        strip.text.x = element_blank(),
+        axis.line.x.top = element_blank(),
+        axis.line.y.right = element_blank(),
+        legend.position = "none",
+        legend.text = element_text(size = 17),
+        legend.title = element_text(size = 19),
+        axis.title.x = element_text(size = 23, margin = margin(t = 15)), 
+        axis.title.y = element_text(size = 23, colour = "black"),  
+        plot.title = element_text(size = 27, face = "bold", hjust = -.1)) +
+  scale_x_discrete(labels = c("P. darwinii", "M. plantaginea", "B. grande")) +
+  scale_y_continuous(limits = c(3, 4.25), breaks = seq(3, 4.25, by = 0.25)) +
+  ggtitle(expression(bold("b  ")~italic(P[plain(max)]))) +
+  labs(x = NULL, y = expression(Rate~(log~mu*mol~O[2]~g^-1~hr^-1))) +
+  scale_color_manual(values = custom_colors)
+
+Pmax
+```
+
+#E mean plot
+```{r}
+library(ggplot2)
+library(dplyr)
+
+E_data <- read.csv('Coral_E.csv')
+
+# Convert 'Species' to factor and remove Tcocc species
+E_data$Species <- as.factor(E_data$Species)
+E_data <- E_data[E_data$Species != 'Tcocc', ]
+
+# Define custom colors
+custom_colors <- c("Bgran" = "lemonchiffon2", "Pdarw" = "salmon", "Mplan" = "mediumpurple1")
+
+# Define the desired order of species
+desired_order <- c("Pdarw", "Mplan", "Bgran")
+
+# Reorder the 'Species' factor
+E_data$Species <- factor(E_data$Species, levels = desired_order)
+
+# Full names for the species
+full_names <- c("P. darwinii", "M. plantaginea", "B. grandis")
+
+E_data_filtered_summary <- E_data %>%
+  group_by(Species) %>%
+  summarise(Topt_mean = mean(E), 
+            sd = sd(E),
+            n = n()) %>%
+  mutate(se = qt(0.975, df = n - 1) * (sd / sqrt(n))) %>%
+  ungroup()
+
+E <- ggplot() + 
+  geom_point(data = E_data_filtered_summary, 
+             aes(x = Species, y = Topt_mean, color = Species), 
+             shape = "-", size = 40,  # Adjust size for line thickness
+             position = position_dodge(width = 0.85)) +
+  geom_errorbar(data = E_data_filtered_summary, 
+                aes(x = Species, ymin = Topt_mean - se, ymax = Topt_mean + se, 
+                    colour = Species),  
+                size = 27, width = 0, alpha = 0.5, 
+                position = position_dodge(width = 0.85)) +
+  geom_jitter(data = E_data, 
+              aes(x = Species, y = E, 
+                  colour = Species),
+              size = 1.5, alpha = 0.75, 
+              position = position_jitterdodge(jitter.width = 0.2,
+                                               jitter.height = 0.02, 
+                                               dodge.width = 0.85)) +
+  theme(axis.text.x = element_text(size = 18, angle = 0, hjust = 0.5, colour = "black", face = "italic"),
+        axis.text.y = element_text(size = 18, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        strip.text.x = element_blank(),
+        axis.line.x.top = element_blank(),
+        axis.line.y.right = element_blank(),
+        legend.position = "none",
+        legend.text = element_text(size = 17),
+        legend.title = element_text(size = 19),
+        axis.title.x = element_text(size = 23, margin = margin(t = 15)), 
+        axis.title.y = element_text(size = 23, colour = "black"),  
+        plot.title = element_text(size = 27, face = "bold", hjust = -.07)) +
+  scale_x_discrete(labels = c("P. darwinii", "M. plantaginea", "B. grande")) +
+  scale_y_continuous(limits = c(-0.97, 9.73), breaks = seq(0, 9, by = 3)) +
+  ggtitle(expression(bold("c  ")~italic(E))) +
+  labs(x = "Species", y = "Activation Energy (eV)") +
+  scale_color_manual(values = custom_colors)
+
+E
+```
+
+#Eh mean plot
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+# Load data
+Eh_data <- read.csv('Coral_Eh.csv')
+
+# Convert 'Species' to factor and filter data
+Eh_data$Species <- as.factor(Eh_data$Species)
+Eh_data <- subset(Eh_data, Species %in% c("Mplan", "Pdarw"))
+
+# Define custom colors
+custom_colors <- c("Bgran" = "lemonchiffon2", "Pdarw" = "salmon", "Mplan" = "mediumpurple1")
+
+# Define the desired order of species
+desired_order <- c("Pdarw", "Mplan", "Bgran")
+
+# Reorder the 'Species' factor
+Eh_data$Species <- factor(Eh_data$Species, levels = desired_order)
+
+# Full names for the species
+full_names <- c("P. darwinii", "M. plantaginea", "B. grandis")
+
+# Summary for Eh data
+E_data_filtered_summary <- Eh_data %>%
+  group_by(Species) %>%
+  summarise(E_mean = mean(Eh), 
+            sd = sd(Eh),
+            n = n()) %>%
+  mutate(se = qt(0.975, df = n - 1) * (sd / sqrt(n))) %>%
+  ungroup()
+
+# Plot 1 - Eh plot for Pdarw and Mplant
+Eh <- ggplot() + 
+  geom_point(data = E_data_filtered_summary, aes(x = Species, y = E_mean, 
+               color = Species), shape = "-", size = 54, 
+               position = position_dodge(width = 0.85)) +
+  geom_errorbar(data = E_data_filtered_summary, 
+                aes(x = Species, ymin = E_mean - se, ymax = E_mean + se, 
+                    colour = Species),  
+                size = 20, width = 0, alpha = 0.6, 
+                position = position_dodge(width = 0.85)) +
+  geom_jitter(data = Eh_data, 
+              aes(x = Species, y = Eh, 
+                  colour = Species),
+              size = 2, alpha = 0.5, 
+              position = position_jitterdodge(jitter.width = 0.2,
+                                               jitter.height = 0.02, 
+                                               dodge.width = 0.85)) +
+    theme(axis.text.x = element_text(size = 18, angle = 0, hjust = 0.5, colour = "black", face = "italic"),
+        axis.text.y = element_text(size = 18, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        strip.text.x = element_blank(),
+        axis.line.x.top = element_blank(),
+        axis.line.y.right = element_blank(),
+        legend.position = "none",
+        legend.text = element_text(size = 17),
+        legend.title = element_text(size = 19),
+        axis.title.x = element_text(size = 22, margin = margin(t = 15)), # Adjust the margin here
+        axis.title.y = element_text(size = 20, colour = "white"),  # Adjust the margin here
+        plot.title = element_text(size = 27, face = "bold", hjust = -.1)) +
+  scale_x_discrete(labels = c("P. darwinii", "M. plantaginea", "B. grandis")) +
+  scale_y_continuous(limits = c(0, 6), breaks = seq(0, 6, by = 1)) +
+  ggtitle(expression(bold("d  ")~italic(E[plain(h)]))) +
+  labs(x = "Species", y = "Energy (eV)") +
+  scale_color_manual(values = custom_colors) +
+  theme(plot.title = element_text(hjust = -0.05))
+
+
+# Plot 2 - Eh Bgran plot
+
+# Filter data to include only species "Bgran"
+Eh_bgran_data <- read.csv('Coral_Eh.csv')
+
+# Convert 'Species' to factor and remove Tcocc species
+Eh_bgran_data$Species <- as.factor(Eh_bgran_data$Species)
+
+# Filter data to include only species "Bgran"
+Eh_bgran_data <- subset(Eh_bgran_data, Species == "Bgran")
+
+# Define custom colors
+custom_colors <- c("Bgran" = "lemonchiffon2", "Pdarw" = "salmon", "Mplan" = "mediumpurple1")
+
+# Define the desired order of species
+desired_order <- c("Pdarw", "Mplan", "Bgran")
+
+# Reorder the 'Species' factor
+Eh_bgran_data$Species <- factor(Eh_bgran_data$Species, levels = desired_order)
+
+# Full names for the species
+full_names <- c("P. darwinii", "M. plantaginea", "B. grandis")
+
+E_data_bgran_filtered_summary <- Eh_bgran_data %>%
+  group_by(Species) %>%
+  summarise(Topt_mean = mean(Eh), 
+            sd = sd(Eh),
+            n = n()) %>%
+  mutate(se = qt(0.975, df = n - 1) * (sd / sqrt(n))) %>%
+  ungroup()
+
+Eh_bgran <- ggplot() + 
+  geom_point(data = E_data_bgran_filtered_summary, aes(x = Species, y = Topt_mean, 
+               color = Species), shape = "-", size = 54, 
+               position = position_dodge(width = 0.85)) +
+  geom_errorbar(data = E_data_bgran_filtered_summary, 
+                aes(x = Species, ymin = Topt_mean - se, ymax = Topt_mean + se, 
+                    colour = Species),  
+                size = 20, width = 0, alpha = 0.6, 
+                position = position_dodge(width = 0.85)) +
+  geom_jitter(data = Eh_bgran_data, 
+              aes(x = Species, y = Eh, 
+                  colour = Species),
+              size = 2, alpha = 0.5, 
+              position = position_jitterdodge(jitter.width = 0.2,
+                                               jitter.height = 0.02, 
+                                               dodge.width = 0.85)) +
+    theme(axis.text.x = element_text(size = 18, angle = 0, hjust = 0.5, colour = "black", face = "italic"),
+        axis.text.y = element_text(size = 18, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        strip.text.x = element_blank(),
+        axis.line.x.top = element_blank(),
+        axis.line.y.right = element_blank(),
+        legend.position = "none",
+        legend.text = element_text(size = 17),
+        legend.title = element_text(size = 19),
+        axis.title.x = element_text(size = 22, margin = margin(t = 15), colour = "white"), # Adjust the margin here
+        axis.title.y = element_text(size = 20, colour = "white"),  # Adjust the margin here
+        plot.title = element_text(size = 27, face = "bold", hjust = -.1)) +
+  scale_x_discrete(labels = c("P. darwinii", "M. plantaginea", "B. grandis")) +
+  scale_y_continuous(limits = c(76, 79.5), breaks = seq(76, 79.5, by = 0.5)) +
+  labs(x = "Species", y = "Energy (eV)") +
+  scale_color_manual(values = custom_colors) +
+  theme(plot.title = element_text(hjust = -0.05))
+
+library(gridExtra)
+
+# Define the x-axis labels for each plot
+labels_left <- c("P. darwinii", "M. plantaginea")
+labels_right <- c("B. grandis")
+
+# Create the plots with different x-axis labels
+Eh_left <- Eh + scale_x_discrete(labels = labels_left)
+Eh_bgran_right <- Eh_bgran + scale_x_discrete(labels = labels_right)
+
+# Adjust x-axis title margin for both plots
+Eh_left <- Eh_left + theme(axis.title.x = element_text(margin = margin(t = 20)))
+Eh_bgran_right <- Eh_bgran_right + theme(axis.title.x = element_text(margin = margin(t = 20)))
+
+# Define the layout for the plots
+Eh_combined <- grid.arrange(Eh_left, Eh_bgran_right, ncol = 2)
+
+# Show the combined plot
+Eh_combined
+```
+
+#combined parameter mean plot
+```{r}
+library(gridExtra)
+grid.arrange(Topt, Pmax,E, Eh_combined, ncol =2)
+```
+
+
+##TPCs labeled Topts (Fig 2)###
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+
+# Read data
+mydata <- read.csv('Photo.R_full_nooutliers.csv')
+preds2 <- read.csv('preds2nooutliers.csv')
+
+# Define custom colors
+custom_colors <- c("Bgran" = "lemonchiffon2", "Pdarw" = "salmon", 
+                   "Mplan" = "mediumpurple1", "Tcocc" = "darkorange1")
+
+# Create a combined plot for all species
+# Reorder Species factor to adjust legend order
+mydata$Species <- factor(mydata$Species, levels = c("Pdarw", "Mplan", "Bgran", "Tcocc"))
+preds2$Species <- factor(preds2$Species, levels = c("Pdarw", "Mplan", "Bgran", "Tcocc"))
+
+# Recreate the plot with the reordered Species factor
+combined_plot <- ggplot() +
+  # Add data points for all species
+  geom_point(data = mydata, aes(x = K - 273.15, y = log.rate, color = Species), size = 2) +
+  # Add smoothed lines for all species using geom_smooth with SE and span
+  geom_smooth(data = preds2, aes(x = K - 273.15, y = ln.rate, color = Species, fill = Species),
+              method = "loess", size = 1, se = TRUE, span = 0.25, alpha = 0.4) +
+  # Add dotted lines and intersection points
+  geom_segment(aes(x = 20.0, xend = 33.3, y = 4.0, yend = 4.0), 
+               linetype = "dotted", color = "red", size = 1, alpha = 0.3) +
+  geom_segment(aes(x = 33.3, xend = 33.3, y = 2.0, yend = 4.0), 
+               linetype = "dotted", color = "red", size = 1, alpha = 0.3) +
+  geom_point(aes(x = 33.3, y = 4.0), shape = 13, color = "red", size = 4) +
+  geom_segment(aes(x = 20.0, xend = 35.0, y = 3.8, yend = 3.8), 
+               linetype = "dotted", color = "purple", size = 1, alpha = 0.3) +
+  geom_segment(aes(x = 35.0, xend = 35.0, y = 2.0, yend = 3.8), 
+               linetype = "dotted", color = "purple", size = 1, alpha = 0.3) +
+  geom_point(aes(x = 35.0, y = 3.8), shape = 13, color = "purple", size = 4) +
+  geom_segment(aes(x = 20.0, xend = 35.4, y = 3.4, yend = 3.4), 
+               linetype = "dotted", color = "tan", size = 1, alpha = 0.3) +
+  geom_segment(aes(x = 35.4, xend = 35.4, y = 2.0, yend = 3.4), 
+               linetype = "dotted", color = "tan", size = 1, alpha = 0.3) +
+  geom_point(aes(x = 35.4, y = 3.4), shape = 13, color = "tan", size = 4) +
+  # Set plot aesthetics
+  theme_bw(base_size = 12, base_family = 'Helvetica') +
+  labs(
+    x = "Temperature (ºC)", 
+    y = expression(Respiration~Rate~(log~mu*mol~O[2]~g^-1~hr^-1)),
+    color = "Species",  # Add legend title for color
+    fill = "Species"    # Add legend title for fill
+  ) +
+  scale_color_manual(
+    values = custom_colors,
+    labels = c(
+      expression(italic("P. darwinii")),
+      expression(italic("M. plantaginea")),
+      expression(italic("B. grande")),
+      expression(italic("T. coccinea"))
+    )
+  ) +
+  scale_fill_manual(
+    values = custom_colors,
+    labels = c(
+      expression(italic("P. darwinii")),
+      expression(italic("M. plantaginea")),
+      expression(italic("B. grande")),
+      expression(italic("T. coccinea"))
+    )
+  ) +
+  scale_x_continuous(breaks = seq(20, 36, by = 4)) +  # Set x-axis ticks
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.text.y = element_text(size = 18, color = "black"),
+    axis.title.y = element_text(size = 23),  # Set y-axis title size
+    axis.text.x = element_text(size = 18, color = "black"),  # Set x-axis tick label size
+    axis.title.x = element_text(size = 23),  # Set x-axis title size
+    legend.position = "top",  
+    legend.justification = c(0.15, 5),
+    #legend.justification = "left",      # Anchor the legend to the left
+    legend.box.just = "left",  # Position legend on the right
+    legend.title = element_text(size = 19),  # Set legend title size
+    legend.text = element_text(size = 16, hjust = 0),
+     legend.margin = margin(b = 15),  # increase space between legend and plot
+  # Left-align legend text
+  )
+
+# Display the plot
+print(combined_plot)
+
+
+```
+
+
+##Relationship between Topt-Pmax (Fig 3)##
+```{r}
+library(tidyverse)
+
+# Define colors
+custom_colors <- c("Bgran" = "lemonchiffon2", 
+                   "Pdarw" = "salmon", 
+                   "Mplan" = "mediumpurple1")
+
+# Map short species codes to full italicized names
+species_labels <- c("Bgran" = expression(italic("B. grande")),
+                    "Pdarw" = expression(italic("P. darwinii")),
+                    "Mplan" = expression(italic("M. plantaginea")))
+
+# Load your dataset
+df <- read_csv("Corals_Topt_Pmax_Fig3.csv") 
+
+# Summarize by species
+species_summary <- df %>%
+  group_by(Species) %>%
+  summarise(
+    mean_Topt = mean(Topt, na.rm = TRUE),
+    se_Topt   = sd(Topt, na.rm = TRUE)/sqrt(n()),
+    mean_Pmax = mean(Pmax, na.rm = TRUE),
+    se_Pmax   = sd(Pmax, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ci_Topt_low = mean_Topt - 1.96*se_Topt,
+    ci_Topt_high = mean_Topt + 1.96*se_Topt,
+    ci_Pmax_low = mean_Pmax - 1.96*se_Pmax,
+    ci_Pmax_high = mean_Pmax + 1.96*se_Pmax
+  )
+
+# Plot
+# Plot with legend on top and reordered species
+p <- ggplot() +
+  # Individual points
+  geom_point(data = df, aes(x = Topt, y = Pmax, color = Species), 
+             size = 2.5, alpha = 0.6) +
+  # Species-level means
+  geom_point(data = species_summary, aes(x = mean_Topt, y = mean_Pmax, color = Species),
+             size = 4) +
+  # Error bars
+  geom_errorbar(data = species_summary, 
+                aes(x = mean_Topt, ymin = ci_Pmax_low, ymax = ci_Pmax_high, color = Species), 
+                width = 0.1, size = 1) +
+  geom_errorbarh(data = species_summary, 
+                 aes(y = mean_Pmax, xmin = ci_Topt_low, xmax = ci_Topt_high, color = Species), 
+                 height = 0.1, size = 1) +
+  # Regression line with lighter gray CI
+  geom_smooth(data = df, aes(x = Topt, y = Pmax), 
+              method = "lm", se = TRUE, color = "black", linetype = "dashed",
+              fill = "grey80", alpha = 0.3, inherit.aes = FALSE) +
+  # Color and labels, reorder species in legend
+  scale_color_manual(
+    values = custom_colors, 
+    labels = species_labels,
+    breaks = c("Pdarw", "Mplan", "Bgran")   # order left-to-right in legend
+  ) +
+  labs(
+    x = bquote(italic(T)[opt]~"(°C)"),
+    y = bquote(italic(P)[max]~"(log µmol O"[2]*" g"^{-1}*" hr"^{-1}*")"),
+    color = "Species"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    text = element_text(family = "Helvetica"),
+    axis.text.x = element_text(size = 18, color = "black"),
+    axis.text.y = element_text(size = 18, color = "black"),
+    axis.title.x = element_text(size = 23, margin = margin(t = 15)),
+    axis.title.y = element_text(size = 23),
+    legend.position = "top",               # move legend to top
+    legend.text = element_text(size = 17),
+    legend.title = element_text(size = 19)
+  )
+
+print(p)
+
+
+ # Run Pearson correlation test
+ #cor_test <- cor.test(summary_df$mean_Topt, summary_df$mean_Pmax, method = "pearson")
+
+#cor_test
+```
+
+
+###pearson correlation coefficient
+```{r}
+library(tidyverse)
+library(broom)
+
+# Function to compute r, p-value, and 95% CI
+pearson_ci <- function(x, y) {
+  test <- cor.test(x, y, method = "pearson")
+  r <- test$estimate
+  n <- length(x)
+  
+  # Fisher z-transformation
+  z <- 0.5 * log((1 + r)/(1 - r))
+  se_z <- 1 / sqrt(n - 3)
+  z_ci <- qnorm(c(0.025, 0.975), mean = z, sd = se_z)
+  r_ci <- (exp(2 * z_ci) - 1) / (exp(2 * z_ci) + 1)
+  
+  tibble(
+    r = as.numeric(r),
+    t = test$statistic,
+    p.value = test$p.value,
+    r_ci_low = r_ci[1],
+    r_ci_high = r_ci[2],
+    n = n
+  )
+}
+
+# Overall correlation
+overall_cor <- pearson_ci(df$Topt, df$Pmax) %>% mutate(Level = "Overall", Species = "All")
+
+# Species-level correlations
+species_cor <- df %>%
+  group_by(Species) %>%
+  summarise(cor_stats = list(pearson_ci(Topt, Pmax)), .groups = "drop") %>%
+  unnest(cor_stats) %>%
+  mutate(Level = "Species")
+
+# Combine into one table
+cor_table <- bind_rows(overall_cor, species_cor) %>%
+  select(Level, Species, n, r, r_ci_low, r_ci_high, t, p.value)
+
+cor_table
+
+#“Across all individuals (n = 16), Topt and Pmax were significantly negatively correlated (Pearson’s r = #-0.618, p = 0.011). Species-level correlations were not significant, likely due to low sample size per #species.”
+
+```
+
+
+#####include above pearson coefficient, CIs, and p-val
+```{r}
+library(ggplot2)
+
+# Calculate correlation
+cor_test <- cor.test(df$Topt, df$Pmax, method = "pearson")
+
+# Extract relevant stats
+r_value <- round(cor_test$estimate, 2)
+p_value <- signif(cor_test$p.value, 3)
+
+# Approximate 95% CI for r
+r_ci <- cor.test(df$Topt, df$Pmax, method = "pearson", conf.level = 0.95)$conf.int
+r_ci_text <- paste0("95% CI: [", round(r_ci[1], 2), ", ", round(r_ci[2], 2), "]")
+
+# Create annotation text
+annot_text <- paste0("r = ", r_value, "\n", r_ci_text, "\n", "p = ", p_value)
+
+# Plot
+p + 
+  annotate("text", 
+           x = min(df$Topt) + 0.05,   # small offset from left
+           y = min(df$Pmax) + 0.025,   # small offset from bottom
+           label = annot_text,
+           hjust = 0,                # left-aligned
+           vjust = 0,                # bottom-aligned
+           size = 5,
+           family = "Helvetica")
+
+
+# Save plot as PDF
+```
+
+
+#######Parameter model selection and statistical analysis######
+
+#Run this code for each parameter
+```{r}
+library(lme4)
+
+Topt_data <- read.csv('Coral_Topt.csv')
+#Pmax_data <- read.csv('Coral_Pmax.csv')
+#E_data <- read.csv('Coral_E.csv')
+#Eh_data <- read.csv('Coral_Eh.csv')
+
+# Convert Species to factor
+Topt_data$Species <- as.factor(Topt_data$Species)
+
+# Relevel the factor variable
+Topt_data$Species <- relevel(Topt_data$Species, ref = "Bgran")
+
+###For E and Eh parameters###
+#R_log_E  <- lm(log(E) ~Species, data = E_data)
+#R_log_Eh  <- lm(log(Eh) ~Species, data = Eh_data)
+
+# Fit the generalized linear model
+R_glm <- glm(Topt ~ Species, data = Topt_data, family = gaussian(link = "identity"))
+
+# Fit the linear model
+R_lm <- lm(Topt ~ Species, data = Topt_data)
+
+# Obtain the residuals
+residuals_glm <- residuals(R_glm)
+residuals_lm <- residuals(R_lm)
+#residuals_log <- residuals(R_log_E)
+
+
+# Create a QQ plot using qqnorm() and qqline()
+ qqnorm(residuals_glm, main = "QQ Plot for GLM Residuals")
+ qqline(residuals_glm, col = 2)
+
+qqnorm(residuals_lm, main = "QQ Plot for Linear Residuals")
+qqline(residuals_lm, col = 2)
+
+```
+
+#Selecting your model
+```{r}
+# Compare AIC and BIC values
+AIC(R_glm, R_lm)
+
+BIC(R_glm, R_lm)
+
+# Selected model
+R_lm <- lm(Topt ~ Species, data = Topt_data)
+```
+
+#Statistical analysis on the chosen model
+```{r}
+#To compare the means of the levels of the Species variable
+TukeyHSD(aov(R_lm))
+
+#Provides an overall assessment of the significance of the model and the individual predictors
+anova(R_lm)
+
+#Gives you detailed information about the coefficients, standard errors, t-values, and p-values for each predictor
+summary(R_lm)
+
+```
+
+##Pairwise comparisons for significance between groups (Table S1)##
+```{r}
+#Pairwise comparisons between the levels of the Species variable to identify which groups are significantly different from each other
+
+#install.packages("multcomp")
+library(multcomp)
+
+# Create a contrast matrix for all pairwise comparisons between species
+cm <- glht(R_lm, linfct = mcp(Species = "Tukey"))
+
+# Perform the Tukey HSD test
+TukeyHSD <- summary(cm)
+
+# View the results
+print(TukeyHSD)
+```
