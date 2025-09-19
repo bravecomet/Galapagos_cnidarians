@@ -19,6 +19,9 @@ Below contains a list of the associated datafiles and folders, woth descriptions
 
 **How to Run / Reproduce the Analyses**
 Below are step by step instructions to run analyses in this repository, including configuration and assumptions. Adjust paths or versions as needed.
-1. Prerequisites: Install R (version > 4.4.2). Ensure required R packages are available. From the README, these include (but may not be limited to): LoLinR, nls.multstart, lme4, plus any packages used for plotting (ggplot2, etc.). o	Make sure your working directory is the root of this repository (so paths in scripts will work, or adjust them accordingly)
+1. **Prerequisites**: Install R (version > 4.4.2). Ensure required R packages are available. From the README, these include (but may not be limited to): LoLinR, nls.multstart, lme4, plus any packages used for plotting (ggplot2, etc.). Make sure your working directory is the root of this repository (so paths in scripts will work, or adjust them accordingly).
+2. **Data Preparation**: Verify that raw respiration data files are present in Cni_respiration_files and that the metadata file Cni_metadata.csv is complete. Read in the raw data files to ensure they are properly picked up by the code
+3. **Rate Estimation**: Run the scripts in the appropriate order; the 
+
 
 
