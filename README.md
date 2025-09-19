@@ -10,7 +10,7 @@ All statistical analyses were conducted in R v. 4.2.2
 **Folder/File Structure & Contents**
 Below contains a list of the associated datafiles and folders, woth descriptions of what lives in each:
 
-Cni_respiration_files
+Cni_respiration_files: Contains raw respiration measurement files of temperature-dependent O2 measurements for the four study species across a temperature gradient  
 
 
 
