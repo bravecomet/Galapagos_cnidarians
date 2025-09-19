@@ -14,7 +14,8 @@ Below contains a list of the associated datafiles and folders, woth descriptions
 - Generated_rate_estimations: Contains processed, model-derived calculations of metabolic rates for each individual per species x temperature pairing
 - Scripts_Rfiles: The R scripts used to process the raw data, estimate rates, perform statistical analyses, and generate plots. Also included are produced raw data files
 - Cni_metadata.csv: The metadata for every individual in this study, which includes parameters like the start/stop time of each trial, chamber volume/channel, and ash free dry weight estimates
-- HOBO_temperature_data.csv: Environmental temperature records used to characterize the thermal history of locations where the cnidarians reside. Data collected between 7/28/2019 - 1/7/2022 @ 15 min intervals
+- HOBO_temperature_data.csv: Environmental temperature records used to characterize the thermal history of locations where the cnidarians reside. Data collected includes 7/28/2019 - 1/7/2022 @ 15 min intervals
+- README.md: This main document, outlining the purpose, background, methods, and general information on packages and analyses
 
 
 
